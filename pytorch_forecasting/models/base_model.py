@@ -270,6 +270,7 @@ class PredictCallback(BasePredictionWriter):
             self._decode_lenghts.append(lengths)
             out["decoder_lengths"] = self._decode_lenghts[-1]
         if self.return_y:
+            # print(f"predict_batch_end: {batch_idx}: {batch[0]['encoder_cont'].shape}")
             self._y.append(batch[1])
             out["y"] = self._y[-1]
 
@@ -314,6 +315,16 @@ class PredictCallback(BasePredictionWriter):
             if self.return_decoder_lengths:
                 output["decoder_lengths"] = torch.cat(self._decode_lenghts, dim=0)
             if self.return_y:
+                last_y = self._y[-1]
+                first_y = self._y[0]
+                # check if y is a tuple or list
+                if isinstance(last_y, (tuple, list)):
+                    last_y = last_y[0]
+                if isinstance(first_y, (tuple, list)):
+                    first_y = first_y[0]
+                if last_y is not None and first_y is not None and \
+                    last_y.shape != first_y.shape:
+                    self._y.pop(-1)
                 y = concat_sequences([yi[0] for yi in self._y])
                 if self._y[-1][1] is None:
                     weight = None
@@ -964,6 +975,7 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
         ax=None,
         quantiles_kwargs: Dict[str, Any] = {},
         prediction_kwargs: Dict[str, Any] = {},
+        target_names: Optional[List[str]] = None,
     ) -> plt.Figure:
         """
         Plot prediction of prediction vs actuals
@@ -983,6 +995,26 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
         Returns:
             matplotlib figure
         """
+
+        def lighten_color(color, amount=0.5):
+            """
+            Lightens the given color by multiplying (1-luminosity) by the given amount.
+            Input can be matplotlib color string, hex string, or RGB tuple.
+
+            Examples:
+            >> lighten_color('g', 0.3)
+            >> lighten_color('#F034A3', 0.6)
+            >> lighten_color((.3,.55,.1), 0.5)
+            """
+            import matplotlib.colors as mc
+            import colorsys
+            try:
+                c = mc.cnames[color]
+            except:
+                c = color
+            c = colorsys.rgb_to_hls(*mc.to_rgb(c))
+            return colorsys.hls_to_rgb(c[0], 1 - amount * (1 - c[1]), c[2])
+
         # all true values for y of the first sample in batch
         encoder_targets = to_list(x["encoder_target"])
         decoder_targets = to_list(x["decoder_target"])
@@ -991,10 +1023,15 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
         y_hats = to_list(self.to_prediction(out, **prediction_kwargs))
         y_quantiles = to_list(self.to_quantiles(out, **quantiles_kwargs))
 
+        if target_names is None:
+            target_names = self.target_names
+
         # for each target, plot
         figs = []
-        for y_raw, y_hat, y_quantile, encoder_target, decoder_target in zip(
-            y_raws, y_hats, y_quantiles, encoder_targets, decoder_targets
+        prop_cycle = iter(plt.rcParams["axes.prop_cycle"])
+
+        for y_raw, y_hat, y_quantile, encoder_target, decoder_target, target_name in zip(
+            y_raws, y_hats, y_quantiles, encoder_targets, decoder_targets, target_names
         ):
             y_all = torch.cat([encoder_target[idx], decoder_target[idx]])
             max_encoder_length = x["encoder_lengths"].max()
@@ -1019,16 +1056,18 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
             n_pred = y_hat.shape[0]
             x_obs = np.arange(-(y.shape[0] - n_pred), 0)
             x_pred = np.arange(n_pred)
-            prop_cycle = iter(plt.rcParams["axes.prop_cycle"])
             obs_color = next(prop_cycle)["color"]
-            pred_color = next(prop_cycle)["color"]
+            # pred_color = next(prop_cycle)["color"]
+            # make prediction color darker
+            pred_color = lighten_color(obs_color, 1.3)
+
             # plot observed history
             if len(x_obs) > 0:
                 if len(x_obs) > 1:
                     plotter = ax.plot
                 else:
                     plotter = ax.scatter
-                plotter(x_obs, y[:-n_pred], label="observed", c=obs_color)
+                plotter(x_obs, y[:-n_pred], label=f"observed {target_name}", c=obs_color)
             if len(x_pred) > 1:
                 plotter = ax.plot
             else:
@@ -1039,7 +1078,7 @@ class BaseModel(InitialParameterRepresenterMixIn, LightningModule, TupleOutputMi
                 plotter(x_pred, y[-n_pred:], label=None, c=obs_color)
 
             # plot prediction
-            plotter(x_pred, y_hat, label="predicted", c=pred_color)
+            plotter(x_pred, y_hat, label=f"predicted {target_name}", c=pred_color)
 
             # plot predicted quantiles
             plotter(x_pred, y_quantile[:, y_quantile.shape[1] // 2], c=pred_color, alpha=0.15)
